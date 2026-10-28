@@ -1,74 +1,942 @@
-`--[[
-	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
-]]
-local function setupNPC(humanoid)
-    local character = humanoid.Parent
-    if not character or game.Players:GetPlayerFromCharacter(character) then return end
-    
-    local highlight = character:FindFirstChildOfClass("Highlight")
-    if not highlight then
-        highlight = Instance.new("Highlight")
-        highlight.FillTransparency = 0.5
-        highlight.OutlineTransparency = 0
-        highlight.Parent = character
-    end
-    
-    local billboard = character:FindFirstChild("NPCHealthDisplay")
-    if not billboard then
-        billboard = Instance.new("BillboardGui")
-        billboard.Name = "NPCHealthDisplay"
-        billboard.Size = UDim2.new(4, 0, 1.5, 0)
-        billboard.StudsOffset = Vector3.new(0, 2.5, 0)
-        billboard.AlwaysOnTop = true
-        billboard.Adornee = character:FindFirstChild("Head") or character.PrimaryPart or character:FindFirstChildWhichIsA("BasePart")
-        
-        local textLabel = Instance.new("TextLabel")
-        textLabel.Size = UDim2.new(1, 0, 1, 0)
-        textLabel.BackgroundTransparency = 1
-        textLabel.Text = "HP: " .. (humanoid.MaxHealth > 0 and math.floor(humanoid.Health) or 0)
-        textLabel.Font = Enum.Font.SourceSansBold
-        textLabel.TextSize = 18
-        textLabel.TextColor3 = Color3.new(1, 1, 1)
-        textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-        textLabel.TextStrokeTransparency = 0.5
-        textLabel.Parent = billboard
-        
-        billboard.Parent = character
-    end
-    
-    if not humanoid:GetAttribute("HealthConnected") then
-        humanoid:GetPropertyChangedSignal("Health"):Connect(function()
-            local hpText = "HP: " .. (humanoid.MaxHealth > 0 and math.floor(humanoid.Health) or 0)
-            if billboard and billboard:FindFirstChildOfClass("TextLabel") then
-                billboard:FindFirstChildOfClass("TextLabel").Text = hpText
-            end
-        end)
-        humanoid:SetAttribute("HealthConnected", true)
+--[[
+╔═══════════════════════════════════════════════════════════╗
+║          NPC / BOT ESP  v3.2  ·  Maximum Performance      ║
+║      LocalScript  →  StarterGui   (PC & Mobile)           ║
+╠═══════════════════════════════════════════════════════════╣
+║  PC     : [F] เมนู  │  [E] Toggle ESP                    ║
+║  Mobile : ปุ่ม ESP (ซ้าย)  │  ปุ่ม ☰ (ขวา)              ║
+╠═══════════════════════════════════════════════════════════╣
+║  แก้ไขจาก v3.1                                          ║
+║  • ชื่อ / ระยะ / HP% ตามตำแหน่ง NPC จริง                ║
+║  • ไม่พึ่ง Box 2D สำหรับข้อความอีกต่อไป                  ║
+║  • เพิ่ม HP แบบข้อความเปอร์เซ็นต์                       ║
+║  • fallback ใช้ Head → HumanoidRootPart → PrimaryPart    ║
+╚═══════════════════════════════════════════════════════════╝
+--]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Camera           = workspace.CurrentCamera
+local LocalPlayer      = Players.LocalPlayer
+local PlayerGui        = LocalPlayer.PlayerGui
+
+local isMobile = UserInputService.TouchEnabled
+             and not UserInputService.KeyboardEnabled
+
+local CFG = {
+    ESP_Enabled   = true,
+    ShowBox       = true,
+    ShowSkeleton  = true,
+    ShowHP        = true,
+    ShowHPText    = true,
+    ShowName      = true,
+    ShowDist      = true,
+    ShowTracer    = true,
+
+    MaxDist       = 500,
+    BoxThick      = 1.5,
+    SkelThick     = 1.0,
+    TracerThick   = 1.0,
+    NameSize      = 13,
+    DistSize      = 11,
+    HPTextSize    = 11,
+
+    Opacity       = 1.0,
+
+    BoxCol        = Color3.fromRGB(255, 55,  55),
+    SkelCol       = Color3.fromRGB(255, 180, 55),
+    HPHigh        = Color3.fromRGB(60,  220, 90),
+    HPMid         = Color3.fromRGB(255, 200, 0),
+    HPLow         = Color3.fromRGB(255, 55,  55),
+    HPBgCol       = Color3.fromRGB(20,  20,  20),
+    NameCol       = Color3.fromRGB(255, 255, 255),
+    DistCol       = Color3.fromRGB(190, 190, 190),
+    TracerCol     = Color3.fromRGB(255, 55,  55),
+
+    KeyMenu       = Enum.KeyCode.F,
+    KeyToggle     = Enum.KeyCode.E,
+
+    Filter        = {},
+}
+
+local hasDrawing = false
+do
+    local ok = pcall(function()
+        local t = typeof(Drawing)
+        hasDrawing = (t ~= "nil")
+    end)
+    if not ok then hasDrawing = false end
+end
+
+local huge  = math.huge
+local clamp = math.clamp
+local max   = math.max
+local floor = math.floor
+local sqrt  = math.sqrt
+local fmt   = string.format
+local v2new = Vector2.new
+local v3new = Vector3.new
+local c3new = Color3.new
+
+local function W2S(pos)
+    local s, vis = Camera:WorldToViewportPoint(pos)
+    return s.X, s.Y, vis, s.Z
+end
+
+local function LerpC3(r1,g1,b1, r2,g2,b2, t)
+    return c3new(r1+(r2-r1)*t, g1+(g2-g1)*t, b1+(b2-b1)*t)
+end
+
+local function HPColor(pct)
+    if pct >= 0.5 then
+        local t = (pct - 0.5) * 2
+        return LerpC3(
+            CFG.HPMid.R, CFG.HPMid.G, CFG.HPMid.B,
+            CFG.HPHigh.R,CFG.HPHigh.G,CFG.HPHigh.B, t)
+    else
+        local t = pct * 2
+        return LerpC3(
+            CFG.HPLow.R, CFG.HPLow.G, CFG.HPLow.B,
+            CFG.HPMid.R, CFG.HPMid.G, CFG.HPMid.B, t)
     end
 end
 
-for _, descendant in pairs(workspace:GetDescendants()) do
-    if descendant:IsA("Humanoid") then
-        setupNPC(descendant)
+local function GetPlayerPos()
+    local c = LocalPlayer.Character
+    if c then
+        local h = c:FindFirstChild("HumanoidRootPart")
+        if h then return h.Position end
+    end
+    return Camera.CFrame.Position
+end
+
+local npcSet = {}
+local playerChars = {}
+
+for _, p in ipairs(Players:GetPlayers()) do
+    if p.Character then playerChars[p.Character] = true end
+    p.CharacterAdded:Connect(function(c)   playerChars[c] = true  end)
+    p.CharacterRemoving:Connect(function(c) playerChars[c] = nil  end)
+end
+
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function(c)   playerChars[c] = true  end)
+    p.CharacterRemoving:Connect(function(c) playerChars[c] = nil  end)
+end)
+
+local function IsNPCModel(m)
+    if not m:IsA("Model") then return false end
+    if playerChars[m] then return false end
+    local ok = m:FindFirstChildOfClass("Humanoid")
+            or m:FindFirstChild("HumanoidRootPart")
+            or m:FindFirstChild("Torso")
+            or m:FindFirstChild("UpperTorso")
+    if not ok then return false end
+    if #CFG.Filter == 0 then return true end
+    local low = m.Name:lower()
+    for _, kw in ipairs(CFG.Filter) do
+        if low:find(kw, 1, true) then return true end
+    end
+    return false
+end
+
+for _, d in ipairs(workspace:GetDescendants()) do
+    if IsNPCModel(d) then npcSet[d] = true end
+end
+
+local pool = {}
+
+local SLOT_KEYS = {"b1","b2","b3","b4","hpBg","hpFg","nameT","distT","hpT","tracer"}
+local MAX_SKEL = 10
+
+local function NewLine(col, thick, alpha)
+    if not hasDrawing then return nil end
+    local l = Drawing.new("Line")
+    l.Visible      = false
+    l.Color        = col
+    l.Thickness    = thick
+    l.Transparency = 1 - alpha
+    return l
+end
+
+local function NewRect(col, alpha, filled)
+    if not hasDrawing then return nil end
+    local q = Drawing.new("Square")
+    q.Visible      = false
+    q.Color        = col
+    q.Transparency = 1 - alpha
+    q.Filled       = filled
+    q.Thickness    = 1
+    return q
+end
+
+local function NewText(col, sz)
+    if not hasDrawing then return nil end
+    local t = Drawing.new("Text")
+    t.Visible      = false
+    t.Color        = col
+    t.Size         = sz
+    t.Font         = Drawing.Fonts.UI
+    t.Outline      = true
+    t.OutlineColor = Color3.new(0,0,0)
+    t.Center       = true
+    return t
+end
+
+local function CreateSlot()
+    local op = CFG.Opacity
+    local s = {
+        b1     = NewLine(CFG.BoxCol,    CFG.BoxThick,    op),
+        b2     = NewLine(CFG.BoxCol,    CFG.BoxThick,    op),
+        b3     = NewLine(CFG.BoxCol,    CFG.BoxThick,    op),
+        b4     = NewLine(CFG.BoxCol,    CFG.BoxThick,    op),
+        hpBg   = NewRect(CFG.HPBgCol,  op * 0.85, true),
+        hpFg   = NewRect(CFG.HPHigh,   op,        true),
+        nameT  = NewText(CFG.NameCol,  CFG.NameSize),
+        distT  = NewText(CFG.DistCol,  CFG.DistSize),
+        hpT    = NewText(CFG.HPHigh,   CFG.HPTextSize),
+        tracer = NewLine(CFG.TracerCol, CFG.TracerThick, op * 0.6),
+        sk     = {},
+    }
+    for i = 1, MAX_SKEL do
+        s.sk[i] = NewLine(CFG.SkelCol, CFG.SkelThick, op * 0.75)
+    end
+    return s
+end
+
+local function HideSlot(s)
+    if not s then return end
+    for _, k in ipairs(SLOT_KEYS) do
+        local d = s[k]
+        if d then d.Visible = false end
+    end
+    for i = 1, MAX_SKEL do
+        if s.sk[i] then s.sk[i].Visible = false end
     end
 end
 
-workspace.DescendantAdded:Connect(function(descendant)
-    if descendant:IsA("Humanoid") then
-        setupNPC(descendant)
+local function DestroySlot(s)
+    if not s then return end
+    for _, k in ipairs(SLOT_KEYS) do
+        local d = s[k]
+        if d then pcall(function() d:Remove() end) end
+    end
+    for i = 1, MAX_SKEL do
+        if s.sk[i] then pcall(function() s.sk[i]:Remove() end) end
+    end
+end
+
+local function ApplyOpacityAll()
+    local op = CFG.Opacity
+    for _, s in pairs(pool) do
+        local inv = 1 - op
+        for _, k in ipairs({"b1","b2","b3","b4"}) do
+            if s[k] then s[k].Transparency = inv end
+        end
+        if s.hpBg   then s.hpBg.Transparency   = 1 - op * 0.85 end
+        if s.hpFg   then s.hpFg.Transparency   = inv            end
+        if s.tracer then s.tracer.Transparency  = 1 - op * 0.6  end
+        for i = 1, MAX_SKEL do
+            if s.sk[i] then s.sk[i].Transparency = 1 - op * 0.75 end
+        end
+        if s.nameT then
+            s.nameT.Color = Color3.new(
+                CFG.NameCol.R * op + (1-op),
+                CFG.NameCol.G * op + (1-op),
+                CFG.NameCol.B * op + (1-op))
+        end
+        if s.distT then
+            s.distT.Color = Color3.new(
+                CFG.DistCol.R * op + (1-op),
+                CFG.DistCol.G * op + (1-op),
+                CFG.DistCol.B * op + (1-op))
+        end
+        if s.hpT then
+            s.hpT.Color = Color3.new(
+                CFG.HPHigh.R * op + (1-op),
+                CFG.HPHigh.G * op + (1-op),
+                CFG.HPHigh.B * op + (1-op))
+        end
+    end
+end
+
+workspace.DescendantAdded:Connect(function(d)
+    if IsNPCModel(d) then npcSet[d] = true end
+end)
+
+workspace.DescendantRemoving:Connect(function(d)
+    npcSet[d] = nil
+    if pool[d] then
+        DestroySlot(pool[d])
+        pool[d] = nil
     end
 end)
 
-while true do
-    wait(5)
-    for _, descendant in pairs(workspace:GetDescendants()) do
-        if descendant:IsA("Humanoid") then
-            local character = descendant.Parent
-            if character and not game.Players:GetPlayerFromCharacter(character) then
-                if not character:FindFirstChildOfClass("Highlight") then
-                    setupNPC(descendant)
+local BBOX_PARTS = {
+    "Head","Torso","UpperTorso","LowerTorso",
+    "HumanoidRootPart",
+    "Left Arm","Right Arm","Left Leg","Right Leg",
+    "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
+    "LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg",
+    "LeftFoot","RightFoot","LeftHand","RightHand",
+}
+
+local CORNER_SIGN = {
+    { 1, 1, 1},{-1, 1, 1},{ 1,-1, 1},{-1,-1, 1},
+    { 1, 1,-1},{-1, 1,-1},{ 1,-1,-1},{-1,-1,-1},
+}
+
+local function GetBox2D(model)
+    local minX,minY =  huge, huge
+    local maxX,maxY = -huge,-huge
+    local any = false
+
+    for _, pname in ipairs(BBOX_PARTS) do
+        local part = model:FindFirstChild(pname)
+        if part and part:IsA("BasePart") then
+            local cf  = part.CFrame
+            local hsx = part.Size.X * 0.5
+            local hsy = part.Size.Y * 0.5
+            local hsz = part.Size.Z * 0.5
+
+            for i = 1, 8 do
+                local sg = CORNER_SIGN[i]
+                local wx,wy,wz = cf:PointToWorldSpace(
+                    v3new(hsx*sg[1], hsy*sg[2], hsz*sg[3]))
+                local sx,sy,vis,depth = W2S(v3new(wx,wy,wz))
+                if vis and depth > 0 then
+                    any = true
+                    if sx < minX then minX = sx end
+                    if sy < minY then minY = sy end
+                    if sx > maxX then maxX = sx end
+                    if sy > maxY then maxY = sy end
                 end
             end
         end
     end
+
+    if not any then return nil end
+    return minX, minY, maxX, maxY
 end
+
+local function GetAnchorPart(model)
+    return model:FindFirstChild("Head")
+        or model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("Torso")
+        or model.PrimaryPart
+end
+
+local JOINTS = {
+    {"Head","UpperTorso"},
+    {"UpperTorso","LowerTorso"},
+    {"LowerTorso","HumanoidRootPart"},
+    {"UpperTorso","LeftUpperArm"},
+    {"LeftUpperArm","LeftLowerArm"},
+    {"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"},
+    {"RightUpperArm","RightLowerArm"},
+    {"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"},
+    {"LeftUpperLeg","LeftLowerLeg"},
+    {"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"},
+    {"RightUpperLeg","RightLowerLeg"},
+    {"RightLowerLeg","RightFoot"},
+    {"Head","Torso"},
+    {"Torso","HumanoidRootPart"},
+    {"Torso","Left Arm"},
+    {"Torso","Right Arm"},
+    {"HumanoidRootPart","Left Leg"},
+    {"HumanoidRootPart","Right Leg"},
+}
+
+local linesBuf = {}
+for i = 1, MAX_SKEL do linesBuf[i] = {0,0,0,0} end
+
+local function GetSkelLines(model)
+    local count = 0
+    for _, pair in ipairs(JOINTS) do
+        if count >= MAX_SKEL then break end
+        local pa = model:FindFirstChild(pair[1])
+        local pb = model:FindFirstChild(pair[2])
+        if pa and pb and pa:IsA("BasePart") and pb:IsA("BasePart") then
+            local ax,ay,va,da = W2S(pa.Position)
+            local bx,by,vb,db = W2S(pb.Position)
+            if va and vb and da > 0 and db > 0 then
+                count = count + 1
+                local lb = linesBuf[count]
+                lb[1]=ax; lb[2]=ay; lb[3]=bx; lb[4]=by
+            end
+        end
+    end
+    return count
+end
+
+local function RenderESP()
+    local vpX = Camera.ViewportSize.X
+    local vpY = Camera.ViewportSize.Y
+    local trX = vpX * 0.5
+    local trY = vpY
+
+    local pPos   = GetPlayerPos()
+    local maxD2  = CFG.MaxDist * CFG.MaxDist
+
+    for model, _ in pairs(npcSet) do
+        if not model.Parent then
+            npcSet[model] = nil
+            if pool[model] then DestroySlot(pool[model]); pool[model] = nil end
+            continue
+        end
+
+        local hrp = model:FindFirstChild("HumanoidRootPart")
+                 or model:FindFirstChild("Torso")
+                 or model:FindFirstChild("UpperTorso")
+                 or model.PrimaryPart
+        if not hrp then continue end
+
+        local dp = hrp.Position - pPos
+        local d2 = dp.X*dp.X + dp.Y*dp.Y + dp.Z*dp.Z
+        if d2 > maxD2 then
+            if pool[model] then HideSlot(pool[model]) end
+            continue
+        end
+        local dist = sqrt(d2)
+
+        if not pool[model] then
+            pool[model] = CreateSlot()
+        end
+        local s = pool[model]
+
+        local x0,y0,x1,y1 = GetBox2D(model)
+        local hasBox = x0 ~= nil
+
+        if CFG.ShowBox and hasBox then
+            x0=x0-2; y0=y0-2; x1=x1+2; y1=y1+2
+            s.b1.Visible=true; s.b1.From=v2new(x0,y0); s.b1.To=v2new(x1,y0)
+            s.b2.Visible=true; s.b2.From=v2new(x0,y1); s.b2.To=v2new(x1,y1)
+            s.b3.Visible=true; s.b3.From=v2new(x0,y0); s.b3.To=v2new(x0,y1)
+            s.b4.Visible=true; s.b4.From=v2new(x1,y0); s.b4.To=v2new(x1,y1)
+        else
+            s.b1.Visible=false; s.b2.Visible=false
+            s.b3.Visible=false; s.b4.Visible=false
+        end
+
+        local anchor = GetAnchorPart(model)
+        local ax, ay, avis, adepth = 0, 0, false, 0
+        if anchor then
+            ax, ay, avis, adepth = W2S(anchor.Position + Vector3.new(0, 2.2, 0))
+        end
+
+        if CFG.ShowHP then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            local pct = 1.0
+            if hum and hum.MaxHealth > 0 then
+                pct = clamp(hum.Health / hum.MaxHealth, 0, 1)
+            end
+
+            if hasBox then
+                local barW = 4
+                local barH = y1 - y0
+                local bx   = x0 - barW - 3
+                s.hpBg.Visible  = true
+                s.hpBg.Position = v2new(bx, y0)
+                s.hpBg.Size     = v2new(barW, barH)
+                local fillH = max(1, barH * pct)
+                s.hpFg.Visible  = true
+                s.hpFg.Color    = HPColor(pct)
+                s.hpFg.Position = v2new(bx, y1 - fillH)
+                s.hpFg.Size     = v2new(barW, fillH)
+            else
+                s.hpBg.Visible = false
+                s.hpFg.Visible = false
+            end
+
+            if CFG.ShowHPText and anchor and avis and adepth > 0 then
+                s.hpT.Visible = true
+                s.hpT.Position = v2new(ax, ay + 34)
+                s.hpT.Text = fmt("HP: %.0f%%", pct * 100)
+                s.hpT.Color = HPColor(pct)
+            else
+                s.hpT.Visible = false
+            end
+        else
+            s.hpBg.Visible = false
+            s.hpFg.Visible = false
+            s.hpT.Visible = false
+        end
+
+        if CFG.ShowName and anchor and avis and adepth > 0 then
+            s.nameT.Visible  = true
+            s.nameT.Position = v2new(ax, ay)
+            s.nameT.Text     = model.Name
+        else
+            s.nameT.Visible = false
+        end
+
+        if CFG.ShowDist and anchor and avis and adepth > 0 then
+            s.distT.Visible  = true
+            s.distT.Position = v2new(ax, ay + 16)
+            s.distT.Text     = fmt("%.0f m", dist)
+        else
+            s.distT.Visible = false
+        end
+
+        if CFG.ShowSkeleton then
+            local cnt = GetSkelLines(model)
+            for i = 1, MAX_SKEL do
+                local sk = s.sk[i]
+                if i <= cnt then
+                    local lb = linesBuf[i]
+                    sk.Visible = true
+                    sk.From    = v2new(lb[1],lb[2])
+                    sk.To      = v2new(lb[3],lb[4])
+                else
+                    sk.Visible = false
+                end
+            end
+        else
+            for i = 1, MAX_SKEL do s.sk[i].Visible = false end
+        end
+
+        if CFG.ShowTracer then
+            local sx,sy,vis,depth = W2S(hrp.Position)
+            if vis and depth > 0 then
+                s.tracer.Visible = true
+                s.tracer.From    = v2new(trX, trY)
+                s.tracer.To      = v2new(sx, sy)
+            else
+                s.tracer.Visible = false
+            end
+        else
+            s.tracer.Visible = false
+        end
+    end
+end
+
+local function MakeSlider(parent, labelText, initVal, minVal, maxVal, fmt_fn, onChange)
+    local row = Instance.new("Frame", parent)
+    row.Size             = UDim2.new(1,0,0,52)
+    row.BackgroundColor3 = Color3.fromRGB(18,18,26)
+    row.BorderSizePixel  = 0
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size             = UDim2.new(1,-10,0,22)
+    lbl.Position         = UDim2.new(0,12,0,4)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3       = Color3.fromRGB(215,215,215)
+    lbl.TextSize         = isMobile and 14 or 12
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.Text             = labelText .. fmt_fn(initVal)
+
+    local track = Instance.new("Frame", row)
+    track.Size           = UDim2.new(1,-24,0,8)
+    track.Position       = UDim2.new(0,12,1,-18)
+    track.BackgroundColor3 = Color3.fromRGB(40,40,58)
+    track.BorderSizePixel  = 0
+    Instance.new("UICorner",track).CornerRadius = UDim.new(0,4)
+
+    local rel0 = (initVal - minVal) / (maxVal - minVal)
+    local tfill = Instance.new("Frame", track)
+    tfill.Size           = UDim2.new(rel0,0,1,0)
+    tfill.BackgroundColor3 = Color3.fromRGB(220,40,40)
+    tfill.BorderSizePixel  = 0
+    Instance.new("UICorner",tfill).CornerRadius = UDim.new(0,4)
+
+    local knob = Instance.new("Frame", track)
+    knob.Size            = UDim2.new(0,16,0,16)
+    knob.AnchorPoint     = Vector2.new(0.5,0.5)
+    knob.Position        = UDim2.new(rel0,0,0.5,0)
+    knob.BackgroundColor3= Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    Instance.new("UICorner",knob).CornerRadius = UDim.new(0,8)
+
+    local hit = Instance.new("TextButton", row)
+    hit.Size             = UDim2.new(1,-24,0,30)
+    hit.Position         = UDim2.new(0,12,1,-32)
+    hit.BackgroundTransparency = 1
+    hit.Text             = ""
+    hit.ZIndex           = 10
+
+    local dragging = false
+
+    local function update(screenX)
+        local abs = track.AbsolutePosition
+        local sz  = track.AbsoluteSize
+        local r   = clamp((screenX - abs.X) / sz.X, 0, 1)
+        local val = minVal + (maxVal - minVal) * r
+        tfill.Size      = UDim2.new(r,0,1,0)
+        knob.Position   = UDim2.new(r,0,0.5,0)
+        lbl.Text        = labelText .. fmt_fn(val)
+        onChange(val)
+    end
+
+    hit.MouseButton1Down:Connect(function(mx,_)
+        dragging = true
+        update(mx)
+    end)
+
+    hit.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            update(inp.Position.X)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType == Enum.UserInputType.MouseMovement
+        or inp.UserInputType == Enum.UserInputType.Touch then
+            update(inp.Position.X)
+        end
+    end)
+
+    return row
+end
+
+local twInf = TweenInfo.new(0.12, Enum.EasingStyle.Quad)
+
+local function MakeToggle(parent, label, init, cb)
+    local row = Instance.new("Frame", parent)
+    row.Size             = UDim2.new(1,0,0,38)
+    row.BackgroundColor3 = Color3.fromRGB(18,18,26)
+    row.BorderSizePixel  = 0
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size             = UDim2.new(1,-62,1,0)
+    lbl.Position         = UDim2.new(0,12,0,0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3       = Color3.fromRGB(215,215,215)
+    lbl.TextSize         = isMobile and 14 or 12
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.Text             = label
+
+    local bg = Instance.new("Frame", row)
+    bg.Size              = UDim2.new(0,46,0,24)
+    bg.Position          = UDim2.new(1,-54,0.5,-12)
+    bg.BackgroundColor3  = init and Color3.fromRGB(220,40,40) or Color3.fromRGB(48,48,65)
+    bg.BorderSizePixel   = 0
+    Instance.new("UICorner",bg).CornerRadius = UDim.new(0,12)
+
+    local knob = Instance.new("Frame", bg)
+    knob.Size            = UDim2.new(0,20,0,20)
+    knob.Position        = init and UDim2.new(1,-22,0.5,-10) or UDim2.new(0,2,0.5,-10)
+    knob.BackgroundColor3= Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    Instance.new("UICorner",knob).CornerRadius = UDim.new(0,10)
+
+    local state = init
+    local hit = Instance.new("TextButton", row)
+    hit.Size             = UDim2.new(1,0,1,0)
+    hit.BackgroundTransparency = 1
+    hit.Text             = ""
+    hit.MouseButton1Click:Connect(function()
+        state = not state
+        TweenService:Create(knob, twInf,
+            {Position = state and UDim2.new(1,-22,0.5,-10) or UDim2.new(0,2,0.5,-10)}):Play()
+        TweenService:Create(bg, twInf,
+            {BackgroundColor3 = state and Color3.fromRGB(220,40,40) or Color3.fromRGB(48,48,65)}):Play()
+        cb(state)
+    end)
+end
+
+local function SectionLbl(parent, text)
+    local f = Instance.new("Frame", parent)
+    f.Size             = UDim2.new(1,0,0,24)
+    f.BackgroundColor3 = Color3.fromRGB(200,35,35)
+    f.BackgroundTransparency = 0.75
+    f.BorderSizePixel  = 0
+    Instance.new("UICorner",f).CornerRadius = UDim.new(0,6)
+    local l = Instance.new("TextLabel", f)
+    l.Size             = UDim2.new(1,0,1,0)
+    l.BackgroundTransparency = 1
+    l.TextColor3       = Color3.fromRGB(255,200,200)
+    l.TextSize         = 11
+    l.Font             = Enum.Font.GothamBold
+    l.Text             = text
+end
+
+local function MakeKeybindButton(parent, label, getKey, setKey)
+    local row = Instance.new("Frame", parent)
+    row.Size             = UDim2.new(1,0,0,38)
+    row.BackgroundColor3 = Color3.fromRGB(18,18,26)
+    row.BorderSizePixel  = 0
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size             = UDim2.new(1,-92,1,0)
+    lbl.Position         = UDim2.new(0,12,0,0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3       = Color3.fromRGB(215,215,215)
+    lbl.TextSize         = isMobile and 14 or 12
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.Text             = label
+
+    local btn = Instance.new("TextButton", row)
+    btn.Size             = UDim2.new(0,76,0,26)
+    btn.Position         = UDim2.new(1,-86,0.5,-13)
+    btn.BackgroundColor3 = Color3.fromRGB(45,45,65)
+    btn.TextColor3       = Color3.fromRGB(255,255,255)
+    btn.TextSize         = 12
+    btn.Font             = Enum.Font.GothamBold
+    btn.Text             = getKey().Name
+    btn.BorderSizePixel  = 0
+    Instance.new("UICorner",btn).CornerRadius = UDim.new(0,8)
+
+    local listening = false
+    btn.MouseButton1Click:Connect(function()
+        listening = true
+        btn.Text = "..."
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp, gp)
+        if not listening then return end
+        if gp then return end
+        if inp.UserInputType == Enum.UserInputType.Keyboard then
+            setKey(inp.KeyCode)
+            btn.Text = inp.KeyCode.Name
+            listening = false
+        end
+    end)
+end
+
+local QTAB_REF
+local Win_REF
+
+local function BuildGUI()
+    local old = PlayerGui:FindFirstChild("ESP_v3")
+    if old then old:Destroy() end
+
+    local SG = Instance.new("ScreenGui")
+    SG.Name            = "ESP_v3"
+    SG.ResetOnSpawn    = false
+    SG.DisplayOrder    = 20
+    SG.IgnoreGuiInset  = true
+    SG.Parent          = PlayerGui
+
+    local fab  = isMobile and 56 or 42
+
+    local QTAB = Instance.new("TextButton", SG)
+    QTAB.Size            = UDim2.new(0,fab,0,fab)
+    QTAB.Position        = UDim2.new(0,12,0,52)
+    QTAB.BackgroundColor3= CFG.ESP_Enabled
+                          and Color3.fromRGB(35,170,75)
+                          or  Color3.fromRGB(130,30,30)
+    QTAB.TextColor3      = Color3.fromRGB(255,255,255)
+    QTAB.TextSize        = isMobile and 15 or 11
+    QTAB.Font            = Enum.Font.GothamBold
+    QTAB.Text            = "ESP"
+    QTAB.BorderSizePixel = 0
+    Instance.new("UICorner",QTAB).CornerRadius = UDim.new(1,0)
+    QTAB_REF = QTAB
+
+    local FAB = Instance.new("TextButton", SG)
+    FAB.Size             = UDim2.new(0,fab,0,fab)
+    FAB.Position         = UDim2.new(1,-(fab+12),0,52)
+    FAB.BackgroundColor3 = Color3.fromRGB(200,35,35)
+    FAB.TextColor3       = Color3.fromRGB(255,255,255)
+    FAB.TextSize         = isMobile and 20 or 15
+    FAB.Font             = Enum.Font.GothamBold
+    FAB.Text             = "☰"
+    FAB.BorderSizePixel  = 0
+    Instance.new("UICorner",FAB).CornerRadius = UDim.new(1,0)
+
+    local WW = isMobile and 310 or 275
+    local Win = Instance.new("Frame", SG)
+    Win.Name             = "Win"
+    Win.Size             = UDim2.new(0,WW,0,0)
+    Win.AutomaticSize    = Enum.AutomaticSize.Y
+    Win.Position         = UDim2.new(0.5,-WW/2,0.5,-200)
+    Win.BackgroundColor3 = Color3.fromRGB(9,9,15)
+    Win.BorderSizePixel  = 0
+    Win.Visible          = false
+    Win.Active           = true
+    Win.Draggable        = true
+    Win.ClipsDescendants = true
+    Instance.new("UICorner",Win).CornerRadius = UDim.new(0,10)
+    local wStroke = Instance.new("UIStroke",Win)
+    wStroke.Color     = Color3.fromRGB(200,35,35)
+    wStroke.Thickness = 1.5
+    Win_REF = Win
+
+    local TBar = Instance.new("Frame", Win)
+    TBar.Size            = UDim2.new(1,0,0,40)
+    TBar.BackgroundColor3= Color3.fromRGB(16,9,12)
+    TBar.BorderSizePixel = 0
+    local TBarFix = Instance.new("Frame", TBar)
+    TBarFix.Size = UDim2.new(1,0,0.5,0)
+    TBarFix.Position = UDim2.new(0,0,0.5,0)
+    TBarFix.BackgroundColor3 = Color3.fromRGB(16,9,12)
+    TBarFix.BorderSizePixel  = 0
+
+    local TLbl = Instance.new("TextLabel", TBar)
+    TLbl.Size            = UDim2.new(1,-44,1,0)
+    TLbl.Position        = UDim2.new(0,14,0,0)
+    TLbl.BackgroundTransparency = 1
+    TLbl.TextColor3      = Color3.fromRGB(255,70,70)
+    TLbl.Font            = Enum.Font.GothamBold
+    TLbl.TextSize        = 14
+    TLbl.Text            = "⬡  NPC / BOT ESP  v3.2"
+    TLbl.TextXAlignment  = Enum.TextXAlignment.Left
+
+    local CBtn = Instance.new("TextButton", TBar)
+    CBtn.Size            = UDim2.new(0,26,0,26)
+    CBtn.Position        = UDim2.new(1,-32,0.5,-13)
+    CBtn.BackgroundColor3= Color3.fromRGB(180,35,35)
+    CBtn.TextColor3      = Color3.fromRGB(255,255,255)
+    CBtn.TextSize        = 13
+    CBtn.Font            = Enum.Font.GothamBold
+    CBtn.Text            = "✕"
+    CBtn.BorderSizePixel = 0
+    Instance.new("UICorner",CBtn).CornerRadius = UDim.new(0,6)
+    CBtn.MouseButton1Click:Connect(function() Win.Visible = false end)
+
+    local Scroll = Instance.new("ScrollingFrame", Win)
+    Scroll.Size              = UDim2.new(1,0,0,420)
+    Scroll.Position          = UDim2.new(0,0,0,40)
+    Scroll.BackgroundTransparency = 1
+    Scroll.BorderSizePixel   = 0
+    Scroll.CanvasSize        = UDim2.new(0,0,0,0)
+    Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Scroll.ScrollBarThickness = isMobile and 4 or 3
+    Scroll.ScrollBarImageColor3 = Color3.fromRGB(200,35,35)
+
+    local Ct = Instance.new("Frame", Scroll)
+    Ct.Size              = UDim2.new(1,0,0,0)
+    Ct.AutomaticSize     = Enum.AutomaticSize.Y
+    Ct.BackgroundTransparency = 1
+    Ct.BorderSizePixel   = 0
+    local Lay = Instance.new("UIListLayout", Ct)
+    Lay.Padding          = UDim.new(0,6)
+    Lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    local Pad = Instance.new("UIPadding", Ct)
+    Pad.PaddingLeft  = UDim.new(0,10)
+    Pad.PaddingRight = UDim.new(0,10)
+    Pad.PaddingTop   = UDim.new(0,8)
+    Pad.PaddingBottom= UDim.new(0,8)
+
+    SectionLbl(Ct, "ESP DISPLAY")
+    MakeToggle(Ct,"กรอบ Box 2D",     CFG.ShowBox,      function(v) CFG.ShowBox      = v end)
+    MakeToggle(Ct,"กรอบ Skeleton",   CFG.ShowSkeleton, function(v) CFG.ShowSkeleton = v end)
+    MakeToggle(Ct,"แถบเลือด HP",     CFG.ShowHP,       function(v) CFG.ShowHP       = v end)
+    MakeToggle(Ct,"HP เป็น %",       CFG.ShowHPText,   function(v) CFG.ShowHPText   = v end)
+    MakeToggle(Ct,"ชื่อ NPC",         CFG.ShowName,     function(v) CFG.ShowName     = v end)
+    MakeToggle(Ct,"ระยะห่าง",         CFG.ShowDist,     function(v) CFG.ShowDist     = v end)
+    MakeToggle(Ct,"เส้น Tracer",      CFG.ShowTracer,   function(v) CFG.ShowTracer   = v end)
+
+    SectionLbl(Ct, "ความเข้ม (Opacity)")
+    MakeSlider(Ct, "ความเข้ม:  ", CFG.Opacity, 0.05, 1.0,
+        function(v) return fmt("%.0f%%", v*100) end,
+        function(v)
+            CFG.Opacity = v
+            ApplyOpacityAll()
+        end)
+
+    SectionLbl(Ct, "ระยะมองเห็น")
+    MakeSlider(Ct, "ระยะสูงสุด:  ", CFG.MaxDist, 50, 1000,
+        function(v) return fmt("%.0f m", v) end,
+        function(v) CFG.MaxDist = floor(v) end)
+
+    SectionLbl(Ct, "ขนาดเส้น")
+    MakeSlider(Ct, "กรอบ Box:  ", CFG.BoxThick, 0.5, 4,
+        function(v) return fmt("%.1f", v) end,
+        function(v)
+            CFG.BoxThick = v
+            for _, s in pairs(pool) do
+                for _, k in ipairs({"b1","b2","b3","b4"}) do
+                    if s[k] then s[k].Thickness = v end
+                end
+            end
+        end)
+    MakeSlider(Ct, "Skeleton:  ", CFG.SkelThick, 0.5, 3,
+        function(v) return fmt("%.1f", v) end,
+        function(v)
+            CFG.SkelThick = v
+            for _, s in pairs(pool) do
+                for i = 1, MAX_SKEL do
+                    if s.sk[i] then s.sk[i].Thickness = v end
+                end
+            end
+        end)
+    MakeSlider(Ct, "Tracer:  ", CFG.TracerThick, 0.5, 3,
+        function(v) return fmt("%.1f", v) end,
+        function(v)
+            CFG.TracerThick = v
+            for _, s in pairs(pool) do
+                if s.tracer then s.tracer.Thickness = v end
+            end
+        end)
+
+    if not isMobile then
+        SectionLbl(Ct, "KEYBINDS")
+        MakeKeybindButton(Ct, "คีย์เปิด-ปิด GUI",
+            function() return CFG.KeyMenu end,
+            function(k) CFG.KeyMenu = k end)
+
+        MakeKeybindButton(Ct, "คีย์ Toggle ESP",
+            function() return CFG.KeyToggle end,
+            function(k) CFG.KeyToggle = k end)
+    end
+
+    FAB.MouseButton1Click:Connect(function() Win.Visible = not Win.Visible end)
+
+    local qtTw = TweenInfo.new(0.15, Enum.EasingStyle.Quad)
+    local function ToggleESP()
+        CFG.ESP_Enabled = not CFG.ESP_Enabled
+        local col = CFG.ESP_Enabled
+                    and Color3.fromRGB(35,170,75)
+                    or  Color3.fromRGB(130,30,30)
+        TweenService:Create(QTAB, qtTw, {BackgroundColor3=col}):Play()
+        if not CFG.ESP_Enabled then
+            for _, s in pairs(pool) do HideSlot(s) end
+        end
+    end
+
+    QTAB.MouseButton1Click:Connect(ToggleESP)
+
+    UserInputService.InputBegan:Connect(function(inp, gp)
+        if gp then return end
+        if inp.KeyCode == CFG.KeyMenu then
+            Win.Visible = not Win.Visible
+        elseif inp.KeyCode == CFG.KeyToggle then
+            ToggleESP()
+        end
+    end)
+end
+
+BuildGUI()
+
+RunService.RenderStepped:Connect(function()
+    if not CFG.ESP_Enabled then return end
+    if not hasDrawing then return end
+    RenderESP()
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    for _, s in pairs(pool) do DestroySlot(s) end
+    pool = {}
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if IsNPCModel(d) then npcSet[d] = true end
+    end
+end)
+
+game.Players.PlayerRemoving:Connect(function(p)
+    if p ~= LocalPlayer then return end
+    for _, s in pairs(pool) do DestroySlot(s) end
+end)
+
+warn("[NPC ESP v3.2] ✓ พร้อมใช้งาน — ชื่อ/ระยะ/HP ตาม NPC จริงแล้ว")
